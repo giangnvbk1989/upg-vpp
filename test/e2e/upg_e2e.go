@@ -14,6 +14,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
+	"github.com/pkg/errors"
 	"github.com/wmnsk/go-pfcp/ie"
 
 	"github.com/travelping/upg-vpp/test/e2e/framework"
@@ -359,7 +360,7 @@ var _ = ginkgo.Describe("PFCP Association Release", func() {
 	})
 })
 
-var _ = ginkgo.Describe("PFCP Multiple Sessions", func() {
+var _ = ginkgo.Describe("Multiple PFCP Sessions", func() {
 	// FIXME: should be made compatible with PGW
 	// FIXME: crashes UPG in UPGIPModeV6
 	f := framework.NewDefaultFramework(framework.UPGModeTDF, framework.UPGIPModeV4)
@@ -377,10 +378,8 @@ var _ = ginkgo.Describe("PFCP Multiple Sessions", func() {
 			for j := 0; j < 100; j++ {
 				sessionCfg := &framework.SessionConfig{
 					IdBase: 1,
-					// TODO: using same UE IP multiple times crashes UPG
-					// (should be an error instead)
-					UEIP: ueIPs[j],
-					Mode: f.Mode,
+					UEIP:   ueIPs[j],
+					Mode:   f.Mode,
 				}
 				seid, err := f.PFCP.EstablishSession(f.Context, sessionCfg.SessionIEs()...)
 				framework.ExpectNoError(err)
@@ -403,6 +402,34 @@ var _ = ginkgo.Describe("PFCP Multiple Sessions", func() {
 		framework.ExpectNoError(err)
 		gomega.Expect(parsed.FindSuspectedLeak("pfcp_create_session", 2000)).To(gomega.BeFalse(),
 			"session-related memory leak detected")
+	})
+
+	ginkgo.It("should not be allowed to conflict on UE IPs", func() {
+		sessionCfg := &framework.SessionConfig{
+			IdBase: 1,
+			UEIP:   f.UEIP(),
+			Mode:   f.Mode,
+		}
+		seid, err := f.PFCP.EstablishSession(f.Context, sessionCfg.SessionIEs()...)
+		framework.ExpectNoError(err)
+		// with older UPG versions, the duplicate session creation attempts
+		// succeed till some amount of sessions is reached (about 256), after
+		// which it crashes
+		unexpectedSuccess := false
+		for i := 0; i < 1000; i++ {
+			_, err := f.PFCP.EstablishSession(f.Context, sessionCfg.SessionIEs()...)
+			if err == nil {
+				unexpectedSuccess = true
+			} else {
+				var serverErr *pfcp.PFCPServerError
+				gomega.Expect(errors.As(err, &serverErr)).To(gomega.BeTrue())
+				framework.ExpectEqual(serverErr.Cause, ie.CauseRuleCreationModificationFailure)
+				break
+			}
+
+		}
+		gomega.Expect(unexpectedSuccess).To(gomega.BeFalse(), "EstablishSession succeeded unexpectedly")
+		defer deleteSession(f, seid, true)
 	})
 })
 
